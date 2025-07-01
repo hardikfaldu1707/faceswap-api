@@ -1,54 +1,60 @@
-
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
 import os
-import uuid
-import cv2
-import numpy as np
-import insightface
+import requests
+from flask import Flask, request, jsonify
 from insightface.app import FaceAnalysis
 from insightface.model_zoo import get_model
+import cv2
+import numpy as np
 
 app = Flask(__name__)
-CORS(app)
 
-UPLOAD_FOLDER = "uploads"
-CELEB_FOLDER = "celebrities"
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+# ---------- Function: Download model if not exists ----------
+def download_model_if_missing(model_path, url):
+    if not os.path.exists(model_path):
+        print("Model not found. Downloading from:", url)
+        os.makedirs(os.path.dirname(model_path), exist_ok=True)
+        r = requests.get(url)
+        with open(model_path, 'wb') as f:
+            f.write(r.content)
+        print("Download complete.")
 
-# Load models
+# ---------- Initialize InsightFace ----------
+print("Initializing FaceAnalysis...")
 face_analyzer = FaceAnalysis(name='buffalo_l')
 face_analyzer.prepare(ctx_id=0)
-swapper = get_model('inswapper_128.onnx', download=False)
+
+# ---------- Ensure model is available ----------
+model_path = ".insightface/models/inswapper_128.onnx"
+model_url = "https://huggingface.co/akhaliq/inswapper/resolve/main/inswapper_128.onnx"
+download_model_if_missing(model_path, model_url)
+
+print("Loading inswapper_128 model...")
+swapper = get_model(model_path, download=False)
 swapper.prepare(ctx_id=0)
 
-@app.route('/faceswap_with_list/<target_name>', methods=['POST'])
-def face_swap_with_list(target_name):
-    source = request.files.get('source')
-    if not source:
-        return jsonify({"error": "Missing source image"}), 400
+# ---------- Flask API ----------
+@app.route('/swap', methods=['POST'])
+def swap_faces():
+    if 'source' not in request.files or 'target' not in request.files:
+        return jsonify({'error': 'Both source and target images are required.'}), 400
 
-    target_path = os.path.join(CELEB_FOLDER, target_name)
-    if not os.path.exists(target_path):
-        return jsonify({"error": "Target image not found"}), 404
+    source_img = cv2.imdecode(np.frombuffer(request.files['source'].read(), np.uint8), cv2.IMREAD_COLOR)
+    target_img = cv2.imdecode(np.frombuffer(request.files['target'].read(), np.uint8), cv2.IMREAD_COLOR)
 
-    src_path = os.path.join(UPLOAD_FOLDER, f"src_{uuid.uuid4().hex}.jpg")
-    source.save(src_path)
+    source_faces = face_analyzer.get(source_img)
+    target_faces = face_analyzer.get(target_img)
 
-    img_src = cv2.imread(src_path)
-    img_tgt = cv2.imread(target_path)
+    if len(source_faces) == 0 or len(target_faces) == 0:
+        return jsonify({'error': 'Face not detected in one or both images.'}), 400
 
-    faces_src = face_analyzer.get(img_src)
-    faces_tgt = face_analyzer.get(img_tgt)
+    # Assume using first face
+    result_img = swapper.get(target_img, target_faces[0], source_faces[0], paste_back=True)
 
-    if not faces_src or not faces_tgt:
-        return jsonify({"error": "Face not detected"}), 400
+    _, buffer = cv2.imencode('.jpg', result_img)
+    response = buffer.tobytes()
 
-    swapped_img = swapper.get(img_tgt, faces_tgt[0], faces_src[0], paste_back=True)
-    result_path = os.path.join(UPLOAD_FOLDER, f"result_{uuid.uuid4().hex}.jpg")
-    cv2.imwrite(result_path, swapped_img)
+    return response, 200, {'Content-Type': 'image/jpeg'}
 
-    return send_file(result_path, mimetype='image/jpeg')
-
+# ---------- Main ----------
 if __name__ == '__main__':
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host='0.0.0.0', port=10000)

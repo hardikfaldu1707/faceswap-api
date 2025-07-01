@@ -1,60 +1,77 @@
+from flask import Flask, request, jsonify, send_file
 import os
-import requests
-from flask import Flask, request, jsonify
+import cv2
+import uuid
 from insightface.app import FaceAnalysis
 from insightface.model_zoo import get_model
-import cv2
-import numpy as np
 
 app = Flask(__name__)
 
-# ---------- Function: Download model if not exists ----------
-def download_model_if_missing(model_path, url):
-    if not os.path.exists(model_path):
-        print("Model not found. Downloading from:", url)
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        r = requests.get(url)
-        with open(model_path, 'wb') as f:
-            f.write(r.content)
-        print("Download complete.")
+# Set up face analysis
+faceapp = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
+faceapp.prepare(ctx_id=0, det_size=(640, 640))
 
-# ---------- Initialize InsightFace ----------
-print("Initializing FaceAnalysis...")
-face_analyzer = FaceAnalysis(name='buffalo_l')
-face_analyzer.prepare(ctx_id=0)
+# Model path for face swapper
+model_path = "inswapper_128.onnx"
 
-# ---------- Ensure model is available ----------
-model_path = ".insightface/models/inswapper_128.onnx"
-model_url = "https://huggingface.co/akhaliq/inswapper/resolve/main/inswapper_128.onnx"
-download_model_if_missing(model_path, model_url)
+# Download model if not present
+if not os.path.exists(model_path):
+    print("Model not found. Downloading from: https://huggingface.co/akhaliq/inswapper/resolve/main/inswapper_128.onnx")
+    import urllib.request
+    urllib.request.urlretrieve(
+        "https://huggingface.co/akhaliq/inswapper/resolve/main/inswapper_128.onnx",
+        model_path
+    )
 
-print("Loading inswapper_128 model...")
-swapper = get_model(model_path, download=False)
-swapper.prepare(ctx_id=0)
+# Load swapper model
+try:
+    swapper = get_model(model_path, download=False, providers=["CPUExecutionProvider"])
+except Exception as e:
+    print("Failed to load swapper model:", e)
+    exit(1)
 
-# ---------- Flask API ----------
 @app.route('/swap', methods=['POST'])
 def swap_faces():
     if 'source' not in request.files or 'target' not in request.files:
-        return jsonify({'error': 'Both source and target images are required.'}), 400
+        return jsonify({'error': 'Missing source or target image'}), 400
 
-    source_img = cv2.imdecode(np.frombuffer(request.files['source'].read(), np.uint8), cv2.IMREAD_COLOR)
-    target_img = cv2.imdecode(np.frombuffer(request.files['target'].read(), np.uint8), cv2.IMREAD_COLOR)
+    source_image = request.files['source']
+    target_image = request.files['target']
 
-    source_faces = face_analyzer.get(source_img)
-    target_faces = face_analyzer.get(target_img)
+    source_path = f"/tmp/{uuid.uuid4().hex}_source.jpg"
+    target_path = f"/tmp/{uuid.uuid4().hex}_target.jpg"
+    output_path = f"/tmp/{uuid.uuid4().hex}_output.jpg"
 
-    if len(source_faces) == 0 or len(target_faces) == 0:
-        return jsonify({'error': 'Face not detected in one or both images.'}), 400
+    source_image.save(source_path)
+    target_image.save(target_path)
 
-    # Assume using first face
-    result_img = swapper.get(target_img, target_faces[0], source_faces[0], paste_back=True)
+    # Load images
+    src_img = cv2.imread(source_path)
+    tgt_img = cv2.imread(target_path)
 
-    _, buffer = cv2.imencode('.jpg', result_img)
-    response = buffer.tobytes()
+    # Detect face in source
+    src_faces = faceapp.get(src_img)
+    if len(src_faces) == 0:
+        return jsonify({'error': 'No face found in source image'}), 400
 
-    return response, 200, {'Content-Type': 'image/jpeg'}
+    src_face = src_faces[0]
 
-# ---------- Main ----------
+    # Detect and swap in target
+    tgt_faces = faceapp.get(tgt_img)
+    if len(tgt_faces) == 0:
+        return jsonify({'error': 'No face found in target image'}), 400
+
+    for tgt_face in tgt_faces:
+        tgt_img = swapper.get(tgt_img, tgt_face, src_face, paste_back=True)
+
+    # Save and return result
+    cv2.imwrite(output_path, tgt_img)
+    return send_file(output_path, mimetype='image/jpeg')
+
+@app.route('/')
+def index():
+    return 'FaceSwap API is running ✅'
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=10000)
+

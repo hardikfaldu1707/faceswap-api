@@ -19,7 +19,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # Load models
 face_analyzer = FaceAnalysis(name='buffalo_l')
 face_analyzer.prepare(ctx_id=0)
-swapper = get_model('inswapper_128.onnx', download=True)
+swapper = get_model('inswapper_128.onnx', download=False)
 swapper.prepare(ctx_id=0)
 
 @app.route('/faceswap_with_list/<target_name>', methods=['POST'])

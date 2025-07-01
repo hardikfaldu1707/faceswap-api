@@ -1,6 +1,6 @@
-
 flask
-flask-cors
-insightface
-onnxruntime
 opencv-python
+insightface==0.7.3
+onnx
+onnxruntime
+requests
